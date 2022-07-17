@@ -10,6 +10,7 @@ import { promises, existsSync } from 'fs';
 import { promisify } from 'util';
 import { Op } from 'sequelize';
 import path from 'path';
+import dayjs from 'dayjs';
 
 @Service()
 export default class CronService {
@@ -196,14 +197,22 @@ export default class CronService {
       }
       const err = await this.killTask(doc.command);
       const absolutePath = path.resolve(config.logPath, `${doc.log_path}`);
-      const logFileExist = await fileExist(absolutePath);
-      if (doc.log_path && logFileExist) {
+      const logFileExist = doc.log_path && (await fileExist(absolutePath));
+
+      const endTime = dayjs();
+      const diffTimeStr = doc.last_execution_time
+        ? `，耗时 ${endTime.diff(
+            dayjs(doc.last_execution_time * 1000),
+            'second',
+          )}`
+        : '';
+      if (logFileExist) {
         const str = err ? `\n${err}` : '';
         fs.appendFileSync(
           `${absolutePath}`,
-          `${str}\n## 执行结束...  ${new Date()
-            .toLocaleString('zh', { hour12: false })
-            .replace(' 24:', ' 00:')} `,
+          `${str}\n## 执行结束... ${endTime.format(
+            'YYYY-MM-DD HH:mm:ss',
+          )}${diffTimeStr}`,
         );
       }
     }
@@ -228,6 +237,7 @@ export default class CronService {
       const killLogs = [];
       if (pids && pids.length > 0) {
         // node 执行脚本时还会有10个子进程，但是ps -ef中不存在，所以截取前三个
+        pids = pids.slice(0, 3);
         for (const id of pids) {
           const c = `kill -9 ${id.slice(1)}`;
           try {
@@ -328,7 +338,7 @@ export default class CronService {
     }
 
     const absolutePath = path.resolve(config.logPath, `${doc.log_path}`);
-    const logFileExist = await fileExist(absolutePath);
+    const logFileExist = doc.log_path && (await fileExist(absolutePath));
     if (logFileExist) {
       return getFileContentByName(`${absolutePath}`);
     }
@@ -367,7 +377,7 @@ export default class CronService {
         return files
           .map((x) => ({
             filename: x,
-            directory: relativeDir,
+            directory: relativeDir.replace(config.logPath, ''),
             time: fs.statSync(`${dir}/${x}`).mtime.getTime(),
           }))
           .sort((a, b) => b.time - a.time);
@@ -401,14 +411,26 @@ export default class CronService {
     }
   }
 
-  private getKey(command: string) {
+  private getKey(command: string): string {
     const start =
       command.lastIndexOf('/') !== -1 ? command.lastIndexOf('/') + 1 : 0;
     const end =
       command.lastIndexOf('.') !== -1
         ? command.lastIndexOf('.')
         : command.length;
-    return command.substring(start, end);
+
+    const tmpStr = command.substring(0, start - 1);
+    let index = 0;
+    if (tmpStr.lastIndexOf('/') !== -1 && tmpStr.startsWith('http')) {
+      index = tmpStr.lastIndexOf('/');
+    } else if (tmpStr.lastIndexOf(':') !== -1 && tmpStr.startsWith('git@')) {
+      index = tmpStr.lastIndexOf(':');
+    }
+    if (index) {
+      return `${tmpStr.substring(index + 1)}_${command.substring(start, end)}`;
+    } else {
+      return command.substring(start, end);
+    }
   }
 
   private make_command(tab: Crontab) {
